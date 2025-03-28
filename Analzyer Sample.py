@@ -168,7 +168,74 @@ class SemiconductorProcessAnalyzer:
         
         report_df = pd.DataFrame(report_data)
         return report_df
-    
+    def create_aggregate_charts(self, ref_dfs, compare_dfs, view_mode='time'):
+        """
+        Create aggregate charts for each sensor with all reference and comparison files
+        """
+        aggregate_charts = {}
+        
+        for sensor in self.sensors:
+            # 새로운 Figure 생성
+            fig = go.Figure()
+            
+            # 참조 파일들 추가
+            for ref_filename, ref_df in ref_dfs.items():
+                # 데이터 복사 및 정렬
+                ref_df_aligned = ref_df.copy()
+                
+                if view_mode == 'step':
+                    # 스텝 기준 정렬
+                    min_ref_step = ref_df_aligned['step'].min()
+                    ref_df_aligned['step'] = ref_df_aligned['step'] - min_ref_step
+                    x_ref = ref_df_aligned['step']
+                else:
+                    x_ref = ref_df_aligned['time']
+                
+                # 참조 데이터 추가 (파란색 계열)
+                fig.add_trace(go.Scatter(
+                    x=x_ref, 
+                    y=ref_df_aligned[sensor], 
+                    mode='lines', 
+                    name=f'Ref {ref_filename}',
+                    line=dict(color='blue', width=1, dash='dot')
+                ))
+            
+            # 비교 파일들 추가
+            for compare_filename, compare_df in compare_dfs.items():
+                # 데이터 복사 및 정렬
+                compare_df_aligned = compare_df.copy()
+                
+                if view_mode == 'step':
+                    # 스텝 기준 정렬
+                    min_compare_step = compare_df_aligned['step'].min()
+                    compare_df_aligned['step'] = compare_df_aligned['step'] - min_compare_step
+                    x_compare = compare_df_aligned['step']
+                else:
+                    x_compare = compare_df_aligned['time']
+                
+                # 비교 데이터 추가 (빨간색 계열)
+                fig.add_trace(go.Scatter(
+                    x=x_compare, 
+                    y=compare_df_aligned[sensor], 
+                    mode='lines', 
+                    name=f'Compare {compare_filename}',
+                    line=dict(color='red', width=1, dash='dot')
+                ))
+            
+            # 레이아웃 설정
+            fig.update_layout(
+                title=f'Aggregate {sensor.replace("_", " ").title()} Comparison',
+                xaxis_title='Time' if view_mode == 'time' else 'Step',
+                yaxis_title='Sensor Value',
+                height=400,
+                legend_title_text='Files'
+            )
+            
+            # 고유 키 생성
+            unique_key = f"aggregate_{sensor}_{view_mode}_chart"
+            aggregate_charts[sensor] = (fig, unique_key)
+        
+        return aggregate_charts
     def main(self):
         st.title("Semiconductor Process Log Comparative Analysis")
     
@@ -256,10 +323,11 @@ class SemiconductorProcessAnalyzer:
                 ref_dfs = {ref_file: dataframes[ref_file] for ref_file in ref_files}
                 
                 # Tabs for different analyses
-                tab1, tab2, tab3 = st.tabs([
+                tab1, tab2, tab3, tab4 = st.tabs([
                     "Comparative Charts", 
                     "Correlation Analysis", 
-                    "Generate Report"
+                    "Generate Report",
+                    "Aggregate Charts"  # 새로운 탭 추가
                 ])
                 
                 with tab1:
@@ -341,6 +409,24 @@ class SemiconductorProcessAnalyzer:
                             file_name=f'comparison_report_{"_".join(ref_files)}_vs_{compare_file}.csv',
                             mime='text/csv'
                         )
+                with tab4:
+                    # Aggregate 차트 생성
+                    view_mode = st.radio("Select View Mode for Aggregate Charts", ['Step', 'Time'], key='aggregate_view_mode')
+                    view_mode = view_mode.lower()
+
+                    # 모든 Reference와 Compare 파일 포함
+                    aggregate_charts = self.create_aggregate_charts(
+                    ref_dfs, 
+                    {file: dataframes[file] for file in compare_files}, 
+                    view_mode
+                    )
+
+                    # 차트 디스플레이
+                    columns = st.columns(3)
+                    chart_items = list(aggregate_charts.items())
+                    for i, (sensor, (fig, unique_key)) in enumerate(chart_items):
+                        with columns[i % 3]:
+                            st.plotly_chart(fig, use_container_width=True, key=unique_key)
 
 if __name__ == "__main__":
     analyzer = SemiconductorProcessAnalyzer()
