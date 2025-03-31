@@ -5,6 +5,7 @@ import plotly.graph_objs as go
 from scipy import stats
 from dtaidistance import dtw
 import io
+import matplotlib.pyplot as plt
 
 class SemiconductorProcessAnalyzer:
     def __init__(self):
@@ -18,9 +19,18 @@ class SemiconductorProcessAnalyzer:
         dataframes = {}
         for file in uploaded_files:
             filename = file.name
-            df = pd.read_csv(file, parse_dates=['time'])
-            # Ensure step is integer
-            df['step'] = df['step'].astype(int)
+            # Use error_bad_lines and warn_bad_lines for handling problematic rows
+            df = pd.read_csv(file, parse_dates=['time'], on_bad_lines='warn')
+            
+            # Remove rows with NaN in step column
+            df = df.dropna(subset=['step'])
+            
+            # Ensure step is integer, converting any float/string to int
+            df['step'] = pd.to_numeric(df['step'], errors='coerce').fillna(0).astype(int)
+            
+            # Remove any entirely empty rows
+            df = df.dropna(how='all')
+            
             dataframes[filename] = df
         
         return dataframes
@@ -168,74 +178,299 @@ class SemiconductorProcessAnalyzer:
         
         report_df = pd.DataFrame(report_data)
         return report_df
-    def create_aggregate_charts(self, ref_dfs, compare_dfs, view_mode='time'):
+    
+    def create_step_aligned_chart(self, ref_dfs, compare_df, ref_filenames, compare_filename):
         """
-        Create aggregate charts for each sensor with all reference and comparison files
+        Create charts where data is aligned at the beginning of each step
+        Modified to handle steps with different numbers of data points
         """
-        aggregate_charts = {}
+        charts = {}
         
         for sensor in self.sensors:
-            # 새로운 Figure 생성
             fig = go.Figure()
             
-            # 참조 파일들 추가
+            # Get all steps from reference and compare dataframes
+            all_steps = set()
+            for ref_df in ref_dfs.values():
+                all_steps.update(ref_df['step'].unique())
+            all_steps.update(compare_df['step'].unique())
+            all_steps = sorted(all_steps)
+            
+            # For each reference dataframe
             for ref_filename, ref_df in ref_dfs.items():
-                # 데이터 복사 및 정렬
-                ref_df_aligned = ref_df.copy()
+                # Get unique steps in reference dataframe
+                ref_steps = ref_df['step'].unique()
                 
-                if view_mode == 'step':
-                    # 스텝 기준 정렬
-                    min_ref_step = ref_df_aligned['step'].min()
-                    ref_df_aligned['step'] = ref_df_aligned['step'] - min_ref_step
-                    x_ref = ref_df_aligned['step']
-                else:
-                    x_ref = ref_df_aligned['time']
+                # Compare dataframe steps
+                compare_steps = compare_df['step'].unique()
                 
-                # 참조 데이터 추가 (파란색 계열)
-                fig.add_trace(go.Scatter(
-                    x=x_ref, 
-                    y=ref_df_aligned[sensor], 
-                    mode='lines', 
-                    name=f'Ref {ref_filename}',
-                    line=dict(color='blue', width=1, dash='dot')
-                ))
+                # Plot each step separately to create discontinuities
+                for i, step in enumerate(all_steps):
+                    # Add reference data if step exists in reference file
+                    if step in ref_steps:
+                        ref_step_data = ref_df[ref_df['step'] == step]
+                        
+                        # Create normalized x-axis for alignment, even for single points
+                        if len(ref_step_data) > 1:
+                            ref_x = np.linspace(i, i+0.9, len(ref_step_data))
+                        else:
+                            # For single points, still create a visible point
+                            ref_x = [i + 0.45]  # Center the point
+                        
+                        # Add reference data for this step
+                        fig.add_trace(go.Scatter(
+                            x=ref_x,
+                            y=ref_step_data[sensor],
+                            mode='lines+markers' if len(ref_step_data) > 1 else 'markers',
+                            name=f'Ref {ref_filename} - Step {step}',
+                            line=dict(color='purple'),
+                            marker=dict(size=6),
+                            legendgroup=f'Ref {ref_filename}',
+                            showlegend=i==0  # Only show in legend once per file
+                        ))
+                    
+                    # Add compare data if step exists in compare file
+                    if step in compare_steps:
+                        compare_step_data = compare_df[compare_df['step'] == step]
+                        
+                        # Create normalized x-axis for alignment, even for single points
+                        if len(compare_step_data) > 1:
+                            compare_x = np.linspace(i, i+0.9, len(compare_step_data))
+                        else:
+                            # For single points, still create a visible point
+                            compare_x = [i + 0.45]  # Center the point
+                        
+                        # Add compare data for this step
+                        fig.add_trace(go.Scatter(
+                            x=compare_x,
+                            y=compare_step_data[sensor],
+                            mode='lines+markers' if len(compare_step_data) > 1 else 'markers',
+                            name=f'Compare {compare_filename} - Step {step}',
+                            line=dict(color='red'),
+                            marker=dict(size=6),
+                            legendgroup=f'Compare {compare_filename}',
+                            showlegend=i==0  # Only show in legend once per file
+                        ))
+                
+                # Add vertical lines to indicate step boundaries
+                for i in range(1, len(all_steps)):
+                    fig.add_shape(
+                        type="line",
+                        x0=i, x1=i,
+                        y0=0, y1=1,
+                        yref="paper",
+                        line=dict(color="gray", width=1, dash="dash")
+                    )
             
-            # 비교 파일들 추가
-            for compare_filename, compare_df in compare_dfs.items():
-                # 데이터 복사 및 정렬
-                compare_df_aligned = compare_df.copy()
-                
-                if view_mode == 'step':
-                    # 스텝 기준 정렬
-                    min_compare_step = compare_df_aligned['step'].min()
-                    compare_df_aligned['step'] = compare_df_aligned['step'] - min_compare_step
-                    x_compare = compare_df_aligned['step']
-                else:
-                    x_compare = compare_df_aligned['time']
-                
-                # 비교 데이터 추가 (빨간색 계열)
-                fig.add_trace(go.Scatter(
-                    x=x_compare, 
-                    y=compare_df_aligned[sensor], 
-                    mode='lines', 
-                    name=f'Compare {compare_filename}',
-                    line=dict(color='red', width=1, dash='dot')
-                ))
-            
-            # 레이아웃 설정
+            # Update layout
             fig.update_layout(
-                title=f'Aggregate {sensor.replace("_", " ").title()} Comparison',
-                xaxis_title='Time' if view_mode == 'time' else 'Step',
+                title=f'{sensor.replace("_", " ").title()} Step-Aligned Comparison',
+                xaxis_title='Process Steps (Aligned)',
                 yaxis_title='Sensor Value',
                 height=400,
-                legend_title_text='Files'
+                legend_title="Data Sources",
+                # 범례 클릭 시 완전히 숨기도록 설정
+                legend=dict(
+                    itemclick="toggleothers",  # 클릭 시 다른 모든 트레이스 토글
+                    itemdoubleclick="toggle"   # 더블 클릭 시 해당 트레이스만 토글
+                )
             )
             
-            # 고유 키 생성
-            unique_key = f"aggregate_{sensor}_{view_mode}_chart"
-            aggregate_charts[sensor] = (fig, unique_key)
+            # Add step labels on x-axis
+            if len(all_steps) > 0:
+                fig.update_xaxes(
+                    tickvals=np.arange(0.5, len(all_steps)),
+                    ticktext=[f'Step {step}' for step in all_steps]
+                )
+            
+            # Create unique key for the chart
+            unique_key = f"{'_'.join(ref_filenames)}_{compare_filename}_{sensor}_step_aligned_chart"
+            charts[sensor] = (fig, unique_key)
         
-        return aggregate_charts
+        return charts
+
+    def create_comprehensive_step_aligned_overlay(self, ref_dfs, compare_dfs, tab_prefix=""):
+        """
+        Create step-aligned charts for all reference and comparison files together
+        using the same format as Individual Comparisons
+        """
+        comprehensive_charts = {}
+        
+        for sensor in self.sensors:
+            fig = go.Figure()
+            
+            # Get all steps from all dataframes
+            all_steps = set()
+            for df in list(ref_dfs.values()) + list(compare_dfs.values()):
+                all_steps.update(df['step'].unique())
+            all_steps = sorted(all_steps)
+            
+            # Color palette for different files
+            ref_colors = plt.cm.Blues(np.linspace(0.5, 0.9, len(ref_dfs)))
+            compare_colors = plt.cm.Reds(np.linspace(0.5, 0.9, len(compare_dfs)))
+            
+            # Process reference files
+            for idx, (ref_filename, ref_df) in enumerate(ref_dfs.items()):
+                ref_steps = ref_df['step'].unique()
+                ref_color = f'#{int(ref_colors[idx][0]*255):02x}{int(ref_colors[idx][1]*255):02x}{int(ref_colors[idx][2]*255):02x}'
+                
+                # Plot each step separately to create discontinuities
+                for i, step in enumerate(all_steps):
+                    if step in ref_steps:
+                        ref_step_data = ref_df[ref_df['step'] == step]
+                        
+                        # Create normalized x-axis for alignment
+                        if len(ref_step_data) > 1:
+                            ref_x = np.linspace(i, i+0.9, len(ref_step_data))
+                        else:
+                            ref_x = [i + 0.45]  # Center the point
+                        
+                        # Add reference data for this step
+                        fig.add_trace(go.Scatter(
+                            x=ref_x,
+                            y=ref_step_data[sensor],
+                            mode='lines+markers' if len(ref_step_data) > 1 else 'markers',
+                            name=f'Ref {ref_filename} - Step {step}',
+                            line=dict(color=ref_color),
+                            marker=dict(size=6),
+                            legendgroup=f'Ref {ref_filename}',
+                            showlegend=i==0  # Only show in legend once per file
+                        ))
+            
+            # Process compare files
+            for idx, (compare_filename, compare_df) in enumerate(compare_dfs.items()):
+                compare_steps = compare_df['step'].unique()
+                compare_color = f'#{int(compare_colors[idx][0]*255):02x}{int(compare_colors[idx][1]*255):02x}{int(compare_colors[idx][2]*255):02x}'
+                
+                # Plot each step separately
+                for i, step in enumerate(all_steps):
+                    if step in compare_steps:
+                        compare_step_data = compare_df[compare_df['step'] == step]
+                        
+                        # Create normalized x-axis for alignment
+                        if len(compare_step_data) > 1:
+                            compare_x = np.linspace(i, i+0.9, len(compare_step_data))
+                        else:
+                            compare_x = [i + 0.45]  # Center the point
+                        
+                        # Add compare data for this step
+                        fig.add_trace(go.Scatter(
+                            x=compare_x,
+                            y=compare_step_data[sensor],
+                            mode='lines+markers' if len(compare_step_data) > 1 else 'markers',
+                            name=f'Compare {compare_filename} - Step {step}',
+                            line=dict(color=compare_color),
+                            marker=dict(size=6),
+                            legendgroup=f'Compare {compare_filename}',
+                            showlegend=i==0  # Only show in legend once per file
+                        ))
+            
+            # Add vertical lines to indicate step boundaries
+            for i in range(1, len(all_steps)):
+                fig.add_shape(
+                    type="line",
+                    x0=i, x1=i,
+                    y0=0, y1=1,
+                    yref="paper",
+                    line=dict(color="gray", width=1, dash="dash")
+                )
+            
+            # Update layout
+            fig.update_layout(
+                title=f'{sensor.replace("_", " ").title()} Step-Aligned Comparison (All Files)',
+                xaxis_title='Process Steps (Aligned)',
+                yaxis_title='Sensor Value',
+                height=400,
+                legend_title="Data Sources",
+                legend=dict(
+                    itemclick="toggleothers",
+                    itemdoubleclick="toggle"
+                )
+            )
+            
+            # Add step labels on x-axis
+            if len(all_steps) > 0:
+                fig.update_xaxes(
+                    tickvals=np.arange(0.5, len(all_steps)),
+                    ticktext=[f'Step {step}' for step in all_steps]
+                )
+            
+            # Create unique key for the chart
+            unique_key = f"{tab_prefix}comprehensive_overlay_{sensor}"
+            comprehensive_charts[sensor] = (fig, unique_key)
+        
+        return comprehensive_charts
+
+    
+    # def create_aggregate_charts(self, ref_dfs, compare_dfs, view_mode='time'):
+    #     """
+    #     Create aggregate charts for each sensor with all reference and comparison files
+    #     """
+    #     aggregate_charts = {}
+        
+    #     for sensor in self.sensors:
+    #         # 새로운 Figure 생성
+    #         fig = go.Figure()
+            
+    #         # 참조 파일들 추가
+    #         for ref_filename, ref_df in ref_dfs.items():
+    #             # 데이터 복사 및 정렬
+    #             ref_df_aligned = ref_df.copy()
+                
+    #             if view_mode == 'step':
+    #                 # 스텝 기준 정렬
+    #                 min_ref_step = ref_df_aligned['step'].min()
+    #                 ref_df_aligned['step'] = ref_df_aligned['step'] - min_ref_step
+    #                 x_ref = ref_df_aligned['step']
+    #             else:
+    #                 x_ref = ref_df_aligned['time']
+                
+    #             # 참조 데이터 추가 (파란색 계열)
+    #             fig.add_trace(go.Scatter(
+    #                 x=x_ref, 
+    #                 y=ref_df_aligned[sensor], 
+    #                 mode='lines', 
+    #                 name=f'Ref {ref_filename}',
+    #                 line=dict(color='blue', width=1, dash='dot')
+    #             ))
+            
+    #         # 비교 파일들 추가
+    #         for compare_filename, compare_df in compare_dfs.items():
+    #             # 데이터 복사 및 정렬
+    #             compare_df_aligned = compare_df.copy()
+                
+    #             if view_mode == 'step':
+    #                 # 스텝 기준 정렬
+    #                 min_compare_step = compare_df_aligned['step'].min()
+    #                 compare_df_aligned['step'] = compare_df_aligned['step'] - min_compare_step
+    #                 x_compare = compare_df_aligned['step']
+    #             else:
+    #                 x_compare = compare_df_aligned['time']
+                
+    #             # 비교 데이터 추가 (빨간색 계열)
+    #             fig.add_trace(go.Scatter(
+    #                 x=x_compare, 
+    #                 y=compare_df_aligned[sensor], 
+    #                 mode='lines', 
+    #                 name=f'Compare {compare_filename}',
+    #                 line=dict(color='red', width=1, dash='dot')
+    #             ))
+            
+    #         # 레이아웃 설정
+    #         fig.update_layout(
+    #             title=f'Aggregate {sensor.replace("_", " ").title()} Comparison',
+    #             xaxis_title='Time' if view_mode == 'time' else 'Step',
+    #             yaxis_title='Sensor Value',
+    #             height=400,
+    #             legend_title_text='Files'
+    #         )
+            
+    #         # 고유 키 생성
+    #         unique_key = f"aggregate_{sensor}_{view_mode}_chart"
+    #         aggregate_charts[sensor] = (fig, unique_key)
+        
+    #     return aggregate_charts
+    
     def main(self):
         st.title("Semiconductor Process Log Comparative Analysis")
     
@@ -323,11 +558,13 @@ class SemiconductorProcessAnalyzer:
                 ref_dfs = {ref_file: dataframes[ref_file] for ref_file in ref_files}
                 
                 # Tabs for different analyses
-                tab1, tab2, tab3, tab4 = st.tabs([
-                    "Comparative Charts", 
-                    "Correlation Analysis", 
-                    "Generate Report",
-                    "Aggregate Charts"  # 새로운 탭 추가
+                tab1, tab2, tab3, tab4 ,tab5 = st.tabs([
+                "Comparative Charts", 
+                "Correlation Analysis", 
+                "Generate Report",
+                # "Aggregate Charts",
+                "Step-Aligned Charts",  # New tab for step-aligned charts
+                "Step Detail Anlysis"
                 ])
                 
                 with tab1:
@@ -346,10 +583,10 @@ class SemiconductorProcessAnalyzer:
                         )
                         
                         # Display charts for each sensor
-                        columns = st.columns(3)
+                        columns = st.columns(2)
                         chart_items = list(comparative_charts.items())
                         for i, (sensor, (fig, unique_key)) in enumerate(chart_items):
-                            with columns[i % 3]:
+                            with columns[i % 2]:
                                 st.plotly_chart(fig, use_container_width=True, key=unique_key)
                 
                 with tab2:
@@ -410,24 +647,229 @@ class SemiconductorProcessAnalyzer:
                             mime='text/csv'
                         )
                 with tab4:
-                    # Aggregate 차트 생성
-                    view_mode = st.radio("Select View Mode for Aggregate Charts", ['Step', 'Time'], key='aggregate_view_mode')
-                    view_mode = view_mode.lower()
-
-                    # 모든 Reference와 Compare 파일 포함
-                    aggregate_charts = self.create_aggregate_charts(
-                    ref_dfs, 
-                    {file: dataframes[file] for file in compare_files}, 
-                    view_mode
+                    st.subheader("Step-Aligned Charts")
+                    # Radio button to select chart type
+                    chart_type = st.radio(
+                        "Chart Type",
+                        ["Individual Comparisons", "Comprehensive Overlay"]
                     )
 
-                    # 차트 디스플레이
-                    columns = st.columns(3)
-                    chart_items = list(aggregate_charts.items())
-                    for i, (sensor, (fig, unique_key)) in enumerate(chart_items):
-                        with columns[i % 3]:
-                            st.plotly_chart(fig, use_container_width=True, key=unique_key)
+                    if chart_type == "Individual Comparisons":
+                        # Create step-aligned charts for each comparison file
+                        for compare_file in compare_files:
+                            compare_df = dataframes[compare_file]
+                            st.subheader(f"Step-Aligned: {', '.join(ref_files)} vs {compare_file}")
+                            
+                            # Create step-aligned charts
+                            step_aligned_charts = self.create_step_aligned_chart(
+                                ref_dfs, compare_df, ref_files, compare_file
+                            )
+                            
+                            # Display charts for each sensor
+                            columns = st.columns(2)
+                            chart_items = list(step_aligned_charts.items())
+                            for i, (sensor, (fig, unique_key)) in enumerate(chart_items):
+                                with columns[i % 2]:
+                                    st.plotly_chart(fig, use_container_width=True, key=unique_key)
+                    
+                    else: # Comprehensive Overlay
+                        # Create comprehensive step-aligned overlay with all files
+                        comprehensive_charts = self.create_comprehensive_step_aligned_overlay(
+                            ref_dfs, # Reference dataframes
+                            {file: dataframes[file] for file in compare_files}, # Compare dataframes
+                            tab_prefix="tab4_"  # 고유 접두사 추가
+                        )
+                        
+                        # Display charts for each sensor
+                        columns = st.columns(2)
+                        chart_items = list(comprehensive_charts.items())
+                        for i, (sensor, (fig, unique_key)) in enumerate(chart_items):
+                            with columns[i % 2]:
+                                st.plotly_chart(fig, use_container_width=True, key=unique_key)
 
+                # tab5 부분 (새로운 디테일 분석 탭)
+                with tab5:
+                    st.subheader("Step Detail Analysis")
+                    
+                    # 모든 데이터프레임에서 사용 가능한 스텝 추출
+                    all_steps = set()
+                    for df in list(ref_dfs.values()) + list(dataframes[file] for file in compare_files):
+                        all_steps.update(df['step'].unique())
+                    all_steps = sorted(all_steps)
+                    
+                    # 사용자가 분석할 스텝 선택
+                    selected_step = st.selectbox("Select Step to Analyze", all_steps)
+                    
+                    # 선택된 스텝에 대한 데이터 필터링
+                    ref_step_dfs = {name: df[df['step'] == selected_step] for name, df in ref_dfs.items() if selected_step in df['step'].unique()}
+                    compare_step_dfs = {name: df[df['step'] == selected_step] for name, df in {file: dataframes[file] for file in compare_files}.items() 
+                                    if selected_step in df['step'].unique()}
+                    
+                    # 차트 타입 선택
+                    chart_type = st.radio(
+                        "Chart Type",
+                        ["Statistical Summary", "Distribution Analysis", "Time Series"]
+                    )
+                    
+                    if chart_type == "Statistical Summary":
+                        # 통계 요약 정보 표시
+                        st.subheader(f"Statistical Summary for Step {selected_step}")
+                        
+                        # 센서별 통계 차트 생성
+                        columns = st.columns(2)
+                        for i, sensor in enumerate(self.sensors):
+                            with columns[i % 2]:
+                                fig = go.Figure()
+                                
+                                # 참조 파일 데이터 추가
+                                for name, df in ref_step_dfs.items():
+                                    if not df.empty and sensor in df.columns:
+                                        fig.add_trace(go.Box(
+                                            y=df[sensor],
+                                            name=f"Ref: {name}",
+                                            boxmean=True,
+                                            marker_color='blue'
+                                        ))
+                                
+                                # 비교 파일 데이터 추가
+                                for name, df in compare_step_dfs.items():
+                                    if not df.empty and sensor in df.columns:
+                                        fig.add_trace(go.Box(
+                                            y=df[sensor],
+                                            name=f"Compare: {name}",
+                                            boxmean=True,
+                                            marker_color='red'
+                                        ))
+                                
+                                fig.update_layout(
+                                    title=f"{sensor.replace('_', ' ').title()}",
+                                    yaxis_title="Value",
+                                    height=400
+                                )
+                                
+                                st.plotly_chart(fig, use_container_width=True, key=f"stat_summary_{sensor}_{selected_step}")
+                    
+                    elif chart_type == "Distribution Analysis":
+                        # 분포 분석 차트 표시
+                        st.subheader(f"Distribution Analysis for Step {selected_step}")
+                        
+                        columns = st.columns(2)
+                        for i, sensor in enumerate(self.sensors):
+                            with columns[i % 2]:
+                                fig = go.Figure()
+                                
+                                # 참조 파일 데이터 추가
+                                for name, df in ref_step_dfs.items():
+                                    if not df.empty and sensor in df.columns:
+                                        fig.add_trace(go.Histogram(
+                                            x=df[sensor],
+                                            name=f"Ref: {name}",
+                                            opacity=0.7,
+                                            marker_color='blue'
+                                        ))
+                                
+                                # 비교 파일 데이터 추가
+                                for name, df in compare_step_dfs.items():
+                                    if not df.empty and sensor in df.columns:
+                                        fig.add_trace(go.Histogram(
+                                            x=df[sensor],
+                                            name=f"Compare: {name}",
+                                            opacity=0.7,
+                                            marker_color='red'
+                                        ))
+                                
+                                fig.update_layout(
+                                    title=f"{sensor.replace('_', ' ').title()} Distribution",
+                                    xaxis_title="Value",
+                                    yaxis_title="Count",
+                                    barmode='overlay',
+                                    height=400
+                                )
+                                
+                                st.plotly_chart(fig, use_container_width=True, key=f"dist_analysis_{sensor}_{selected_step}")
+                    
+                    else:  # Time Series
+                        # 시계열 분석 차트 표시
+                        st.subheader(f"Time Series Analysis for Step {selected_step}")
+                        
+                        columns = st.columns(2)
+                        for i, sensor in enumerate(self.sensors):
+                            with columns[i % 2]:
+                                fig = go.Figure()
+                                
+                                # 참조 파일 데이터 추가
+                                for name, df in ref_step_dfs.items():
+                                    if not df.empty and sensor in df.columns:
+                                        fig.add_trace(go.Scatter(
+                                            x=df.index,
+                                            y=df[sensor],
+                                            mode='lines+markers',
+                                            name=f"Ref: {name}",
+                                            line=dict(color='blue')
+                                        ))
+                                
+                                # 비교 파일 데이터 추가
+                                for name, df in compare_step_dfs.items():
+                                    if not df.empty and sensor in df.columns:
+                                        fig.add_trace(go.Scatter(
+                                            x=df.index,
+                                            y=df[sensor],
+                                            mode='lines+markers',
+                                            name=f"Compare: {name}",
+                                            line=dict(color='red')
+                                        ))
+                                
+                                fig.update_layout(
+                                    title=f"{sensor.replace('_', ' ').title()} Time Series",
+                                    xaxis_title="Time",
+                                    yaxis_title="Value",
+                                    height=400
+                                )
+                                
+                                st.plotly_chart(fig, use_container_width=True, key=f"time_series_{sensor}_{selected_step}")
+                # with tab5:
+                #     st.subheader("Step-Aligned Charts")
+                #     # Radio button to select chart type
+                #     chart_type = st.radio(
+                #         "Chart Type",
+                #         ["Individual Comparisons", "Comprehensive Overlay"]
+                #     )
+
+                #     if chart_type == "Individual Comparisons":
+                #         # Create step-aligned charts for each comparison file
+                #         for compare_file in compare_files:
+                #             compare_df = dataframes[compare_file]
+                #             st.subheader(f"Step-Aligned: {', '.join(ref_files)} vs {compare_file}")
+                            
+                #             # Create step-aligned charts
+                #             step_aligned_charts = self.create_step_aligned_chart(
+                #                 ref_dfs, compare_df, ref_files, compare_file
+                #             )
+                            
+                #             # Display charts for each sensor
+                #             columns = st.columns(3)
+                #             chart_items = list(step_aligned_charts.items())
+                #             for i, (sensor, (fig, unique_key)) in enumerate(chart_items):
+                #                 with columns[i % 3]:
+                #                     st.plotly_chart(fig, use_container_width=True, key=unique_key)
+                    
+                #     else: # Comprehensive Overlay
+                #         # Create comprehensive step-aligned overlay with all files
+                #         comprehensive_charts = self.create_comprehensive_step_aligned_overlay(
+                #         ref_dfs, # Reference dataframes
+                #         {file: dataframes[file] for file in compare_files}, # Compare dataframes
+                #         tab_prefix="tab5_"  # 고유 접두사 추가
+                #     )
+                        
+                #         # Display charts for each sensor
+                #         columns = st.columns(3)
+                #         chart_items = list(comprehensive_charts.items())
+                #         for i, (sensor, (fig, unique_key)) in enumerate(chart_items):
+                #             with columns[i % 3]:
+                #                 st.plotly_chart(fig, use_container_width=True, key=unique_key)
+
+        pass
+    
 if __name__ == "__main__":
     analyzer = SemiconductorProcessAnalyzer()
     analyzer.main()
